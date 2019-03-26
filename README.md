@@ -208,7 +208,6 @@ const store = new Vuex.Store({
 })
 ```
 From above code, we can know *Vuex.Store* is a class. Its constructor is defined in the file *src/store*.
-Here is its code:
 ```javascript
 export class Store {
   constructor (options = {}) {
@@ -286,3 +285,202 @@ Firstly, Let's see this portion:
       install(window.Vue)
     }
 ```
+If you are interested, you can take a look at issue #731. Before the fix, if there is a global vue defined on "window.Vue", since the Vuex is installed
+when it is imported, there is no way that we can bind the Vuex with another Vue (different version). Now, the Vuex is installed during initializing the store,
+we can install the Vuex to Vue before creating the store. Then, it works if two different version of Vuex coexists.
+Let's move on.
+```javascript
+if (process.env.NODE_ENV !== 'production') {
+  assert(Vue, `must call Vue.use(Vuex) before creating a store instance.`)
+  assert(typeof Promise !== 'undefined', `vuex requires a Promise polyfill in this browser.`)
+  assert(this instanceof Store, `store must be called with the new operator.`)
+}
+```
+This piece of code prints out some warning message when the environment is development environment.
+The assert function is defined in *src/util*.
+```javascript
+export function assert (condition, msg) {
+  if (!condition) throw new Error(`[vuex] ${msg}`)
+}
+```
+Simple. If the condition is evaluated to false, then throws an error with the message passed in.
+Back to *constructor*, the three messages are:
+* If the *Vue* is not defined, then developer should install the Vuex first.
+* If the global Promise is not defined, then developer needs to define a Promise Polyfill first.
+* If *this* is not an instance of *Store*, then warn developer to initialize a store with *new* operator.
+
+Next, set default values for a bunch of variables. Let's take a look. 
+```javascript
+const {
+  plugins = [],
+  strict = false
+} = options
+```
+The default value of [plugins](https://vuex.vuejs.org/guide/plugins.html) is an empty array.  
+The [strict mode](https://vuex.vuejs.org/guide/strict.html) is disabled initially.  
+```javascript
+// store internal state
+this._committing = false
+this._actions = Object.create(null)
+this._actionSubscribers = []
+this._mutations = Object.create(null)
+this._wrappedGetters = Object.create(null)
+this._modules = new ModuleCollection(options)
+this._modulesNamespaceMap = Object.create(null)
+this._subscribers = []
+this._watcherVM = new Vue()
+```
+Then, it sets some internal states. *_actions*, *_mutations*, *_wrappedGetters* and *_modulesNamespaceMap* are set to a [null object](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/create#Custom_and_Null_objects).
+The null object a like a plain object ({}) without the methods on the prototype.  
+*_subscribers* and *_actionSubscribers* are set to an empty array.  
+*_watcherVM* is set to an instance of Vue.
+The most important code here is following:
+```javascript
+this._modules = new ModuleCollection(options)
+```
+The *_modules* is the instance of *ModuleCollection* and it is initialize with the options of store constructor.
+The *ModuleCollection* is defined in *src/module/module-collection*. Let's look at its constructor first.
+```javascript
+constructor (rawRootModule) {
+  // register root module (Vuex.Store options)
+  this.register([], rawRootModule, false)
+}
+```
+The *constructor* has one parameter *rawRootModule* and it calls the method *register* with three parameters.
+```javascript
+  register (path, rawModule, runtime = true) {
+    if (process.env.NODE_ENV !== 'production') {
+      assertRawModule(path, rawModule)
+    }
+
+    const newModule = new Module(rawModule, runtime)
+    if (path.length === 0) {
+      this.root = newModule
+    } else {
+      const parent = this.get(path.slice(0, -1))
+      parent.addChild(path[path.length - 1], newModule)
+    }
+
+    // register nested modules
+    if (rawModule.modules) {
+      forEachValue(rawModule.modules, (rawChildModule, key) => {
+        this.register(path.concat(key), rawChildModule, runtime)
+      })
+    }
+  }
+```
+In the *constructor* of *Module Collection*, the path is an empty array. The *rawModule* is the options of *Store Constructor*.  
+The default value of *runtime* is true. But, in the *constructor*, it is set to *false*. So, there must be somewhere else calls the function
+*register* without setting *runtime*. We will discuss it later.  
+After explaining all the parameters, let's get to the body of *register*.  
+```javascript
+if (process.env.NODE_ENV !== 'production') {
+  assertRawModule(path, rawModule)
+}
+```
+Under the development environment, it calls the function *assertRawModule* and this function is defined in the same file.  
+```javascript
+function assertRawModule (path, rawModule) {
+  Object.keys(assertTypes).forEach(key => {
+    if (!rawModule[key]) return
+
+    const assertOptions = assertTypes[key]
+
+    forEachValue(rawModule[key], (value, type) => {
+      assert(
+        assertOptions.assert(value),
+        makeAssertionMessage(path, key, type, value, assertOptions.expected)
+      )
+    })
+  })
+}
+```
+If we ignore the code inside of *forEach*, then *assertModule* becomes:
+```javascript
+function assertRawModule (path, rawModule) {
+  Object.keys(assertTypes).forEach(key => {
+    ...
+  })
+}
+```
+It simply goes through each key of *assertTypes* object. The *assertTypes* is defined right above function *assertRawModule*.
+```javascript
+const assertTypes = {
+  getters: functionAssert,
+  mutations: functionAssert,
+  actions: objectAssert
+}
+```
+So, the value of *key* are *getters*, *mutations* and *actions*. On each type, *assertRawModule* does
+```javascript
+if (!rawModule[key]) return
+
+const assertOptions = assertTypes[key]
+
+forEachValue(rawModule[key], (value, type) => {
+  assert(
+    assertOptions.assert(value),
+    makeAssertionMessage(path, key, type, value, assertOptions.expected)
+  )
+})
+```
+Let's look at the first statement.  
+```javascript
+if (!rawModule[key]) return
+```
+We already know the *rawModule* is the options passed to Vuex constructor. So, assuming we initialize the store as the following:
+```javascript
+const store = new Vuex.store({
+  getters: {}
+});
+```
+Then, it directly returns when processing *mutations* and *actions*. If any of *assert types* is passed in, then it goes to the second statement:
+```javascript
+const assertOptions = assertTypes[key]
+```
+It gets value from *assertTypes* and assign it to variable *assertOptions*. According to the definition of *assertTypes*, we know the value is 
+*functionAssert* for both *getters* and *mutations*. But, for *actions*, the value is *objectAssert*.  
+Let's look at what is the *functionAssert* first.  It is defined in the same file.
+```javascript
+const functionAssert = {
+  assert: value => typeof value === 'function',
+  expected: 'function'
+}
+```
+The *functionAssert* is an object with two properties. The property *assert* is a function which check if the passed value is a function.
+The value of property *expected* is a string "function".  
+The *objectAssert* is defined right below the *functionAssert*.   
+```javascript
+const objectAssert = {
+  assert: value => typeof value === 'function' ||
+    (typeof value === 'object' && typeof value.handler === 'function'),
+  expected: 'function or object with "handler" function'
+}
+```
+The *assert* function here checks if the value is a function or an object with property *handler*.
+Back to *forEach* body in *assertRawModule*, variable *assertOptions* could be one of *functionAssert* and *objectAssert*.
+Let's see the next line.
+```javascript
+forEachValue(rawModule[key], (value, type) => {
+  assert(
+    assertOptions.assert(value),
+    makeAssertionMessage(path, key, type, value, assertOptions.expected)
+  )
+})
+```
+Another loop on each item in *rawModule[key]*. As explained before, *rawModule[key]* is each "action", "mutation" and "getter" developer defines
+and passes to *Vuex.Store*. So, on each "action", "mutation" and "getter", calls function *assert*. We have explained the function *assert*.
+It prints out the second parameter if the first parameter is evaluated to false.  
+Thus, for each "mutation" or "getter", its value must be a function. For each "action", its value could be either a function or an object with
+property *handler*. Otherwise, it calls function *makeAssertionMessage*.
+```javascript
+function makeAssertionMessage (path, key, type, value, expected) {
+  let buf = `${key} should be ${expected} but "${key}.${type}"`
+  if (path.length > 0) {
+    buf += ` in module "${path.join('.')}"`
+  }
+  buf += ` is ${JSON.stringify(value)}.`
+  return buf
+}
+```
+It returns a string which is the message printed in the console when the assertion fails.
