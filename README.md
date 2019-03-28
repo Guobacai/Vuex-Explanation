@@ -484,3 +484,124 @@ function makeAssertionMessage (path, key, type, value, expected) {
 }
 ```
 It returns a string which is the message printed in the console when the assertion fails.
+So, the function *assertRawModule* is used for validating the *actions*, *mutations* and *getters*.
+Let's go back to *register*. The next line of code is
+```javascript
+const newModule = new Module(rawModule, runtime)
+```
+It creates an instance of class *Module*. The *rawModule* here is the options of *constructor of store*. And *runtime* is false.
+The class *Module* is defined in the file *src/module/module*.
+```javascript
+export default class Module {
+    constructor (rawModule, runtime) {
+      this.runtime = runtime
+      // Store some children item
+      this._children = Object.create(null)
+      // Store the origin module object which passed by programmer
+      this._rawModule = rawModule
+      const rawState = rawModule.state
+  
+      // Store the origin module's state
+      this.state = (typeof rawState === 'function' ? rawState() : rawState) || {}
+    }
+    ...
+}
+```
+In the constructor, it sets a bunch of initial states. Assuming we create a store:
+```javascript
+const store = new Vuex.Store({
+  state: {
+    open: false
+  }
+});
+```
+So, the *_rawModule* is
+```javascript
+{
+  state: {
+    open: false
+  }
+}
+```
+And, the *rawState* is
+```javascript
+{
+  open: false
+}
+```
+From the last line we can know, the *state* here can be defined as a function or an object. 
+```javascript
+this.state = (typeof rawState === 'function' ? rawState() : rawState) || {}
+```
+After creating an instance of *Module*, the *register* function goes to
+```javascript
+if (path.length === 0) {
+  this.root = newModule
+} else {
+  const parent = this.get(path.slice(0, -1))
+  parent.addChild(path[path.length - 1], newModule)
+}
+```
+It is a *if...else*. The first condition is
+```javascript
+path.length === 0
+```
+When the path is an empty array which is the case in the constructor of store, then it must be the root module.  
+So, it saves the root module to *this.root*.
+Otherwise, the module must be a children module.
+```javascript
+  const parent = this.get(path.slice(0, -1))
+  parent.addChild(path[path.length - 1], newModule)
+```
+The *path.slice(0, -1)* gets the path to the parent module. So, function *get* is called with the path of parent module.
+```javascript
+  get (path) {
+    return path.reduce((module, key) => {
+      return module.getChild(key)
+    }, this.root)
+  }
+```
+The function *get* is actually a reducer. The accumulator is *this.root*. Since the *this.root* points to the root module, so *module* is the
+instance of the *Module* class. Here is the method defined on *Module* class.
+```javascript
+getChild (key) {
+  return this._children[key]
+}
+```
+Simple. It just gets the value from *Module._children*. From the constructor of *Module*, we can know that *_children* is an object which is
+used for storing all the children modules.
+Once it gets the parent module, the current module is added to parent module.
+```javascript
+parent.addChild(path[path.length - 1], newModule)
+```
+*path[path.length - 1]* is the last item of the path which is the path of current module. Let's look at the method *addChild*.
+```javascript
+addChild (key, module) {
+  this._children[key] = module
+}
+```
+It adds the module to *_children* of parent module with the *key*.
+Assuming we have a user module and here is its path:
+```javascript
+path = ['app', 'system', 'user']
+```
+So, the parent module of module "user" is system. In the module "system", it is
+```javascript
+{
+  _children: {
+    "user": user_module
+  }
+}
+```
+Then, the last part of the *register* is
+```javascript
+// register nested modules
+if (rawModule.modules) {
+  forEachValue(rawModule.modules, (rawChildModule, key) => {
+    this.register(path.concat(key), rawChildModule, runtime)
+  })
+}
+```
+If developer defines the *modules* in the options of store constructor, then it registers all these modules as children modules by recursively
+calling the method *register*.  
+The first parameter of *register* become *path.cancat(key)* which is no longer an empty array. So, the module is added to its parent module.
