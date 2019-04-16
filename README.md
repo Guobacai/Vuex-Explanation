@@ -338,6 +338,7 @@ The most important code here is following:
 ```javascript
 this._modules = new ModuleCollection(options)
 ```
+### How modules are initialized?
 The *_modules* is the instance of *ModuleCollection* and it is initialize with the options of store constructor.
 The *ModuleCollection* is defined in *src/module/module-collection*. Let's look at its constructor first.
 ```javascript
@@ -602,6 +603,366 @@ if (rawModule.modules) {
   })
 }
 ```
+*forEachValue* is defined in the *util*  
 If developer defines the *modules* in the options of store constructor, then it registers all these modules as children modules by recursively
 calling the method *register*.  
 The first parameter of *register* become *path.cancat(key)* which is no longer an empty array. So, the module is added to its parent module.
+Let's take the example in the official document.
+```javascript
+const moduleA = {
+  state: { ... },
+  mutations: { ... },
+  actions: { ... },
+  getters: { ... }
+}
+
+const moduleB = {
+  state: { ... },
+  mutations: { ... },
+  actions: { ... }
+}
+
+const store = new Vuex.Store({
+  modules: {
+    a: moduleA,
+    b: moduleB
+  }
+})
+```
+The module collection will become:
+```javascript
+{
+  root: {
+    _children: {
+      a: moduleA,
+      b: moduleB
+    }
+  }
+}
+```
+### How the modules are installed?
+Let's see the next important function in the *store.constructor* - installModule.  
+```javascript
+// init root module.
+// this also recursively registers all sub-modules
+// and collects all module getters inside this._wrappedGetters
+installModule(this, state, [], this._modules.root)
+```
+It is called with three parameters. The first parameter is the instance of the store. The
+second parameter is *state* which is defined right above the *installModule*.
+```javascript
+const state = this._modules.root.state
+```
+The variable state points to the state of the root module.  
+The third parameter is an empty array. And, the final parameter is root module.  
+Let's take a look at the method *installModule*. It is defined in the file *src/store* as well.
+```javascript
+function installModule (store, rootState, path, module, hot) {
+  const isRoot = !path.length
+  const namespace = store._modules.getNamespace(path)
+
+  // register in namespace map
+  if (module.namespaced) {
+    store._modulesNamespaceMap[namespace] = module
+  }
+
+  // set state
+  if (!isRoot && !hot) {
+    const parentState = getNestedState(rootState, path.slice(0, -1))
+    const moduleName = path[path.length - 1]
+    store._withCommit(() => {
+      Vue.set(parentState, moduleName, module.state)
+    })
+  }
+
+  const local = module.context = makeLocalContext(store, namespace, path)
+
+  module.forEachMutation((mutation, key) => {
+    const namespacedType = namespace + key
+    registerMutation(store, namespacedType, mutation, local)
+  })
+
+  module.forEachAction((action, key) => {
+    const type = action.root ? key : namespace + key
+    const handler = action.handler || action
+    registerAction(store, type, handler, local)
+  })
+
+  module.forEachGetter((getter, key) => {
+    const namespacedType = namespace + key
+    registerGetter(store, namespacedType, getter, local)
+  })
+
+  module.forEachChild((child, key) => {
+    installModule(store, rootState, path.concat(key), child, hot)
+  })
+}
+```
+The first line defines a constant *isRoot*. If the path is empty, then *isRoot* is true.
+In the case of the *store.constructor*, the *installModule* is called with third parameter
+*[]*, so *isRoot* is true.  
+The second line is
+```javascript
+const namespace = store._modules.getNamespace(path)
+```
+We explained before, the *store._modules* is a module collection. So, let's see how method
+*getNamespace* is defined on the module collection. 
+```javascript
+getNamespace (path) {
+  let module = this.root
+  return path.reduce((namespace, key) => {
+    module = module.getChild(key)
+    return namespace + (module.namespaced ? key + '/' : '')
+  }, '')
+}
+```
+If the module need to be namespaced, then it only need to set *namespaced* to true.
+The variable *module* points to the root module. Then, it reduces the *path* to a string.
+Every time, it get the child module by the key. If the module is namespaced, then it adds
+the key to the accumulator.  
+
+Let's say we have the following modules defined:
+```javascript
+const store = new Vuex.Store({
+  modules: {
+    account: {
+      namespaced: true,
+      modules: {
+        profile: {
+          namespaced: true,
+          ...
+        },
+        permission: {
+          namespaced: true,
+          ...
+        }
+      },
+      ...
+    }
+  }
+});
+```
+If the path is *["account", "profile"]*, then *getNamespace* returns "account.profile".
+In the *store.constructor*, *installModule* is called with *path=[]*, so the constant
+*namespace* is an empty string.
+```javascript
+const namespace = store._modules.getNamespace(path)
+```
+Let's move on.
+```javascript
+// register in namespace map
+if (module.namespaced) {
+  store._modulesNamespaceMap[namespace] = module
+}
+```
+So, all the children modules are registered in the *_modulesNamespaceMap*.
+```javascript
+store._modulesNamespaceMap = {
+  'account.profile': profileModule,
+  'account.permission': permissionModule
+}
+```
+To make it easier to understand, I will skip the next if block. It will be explained later.
+Then, it sets the variable *local* and *module.context*
+```javascript
+const local = module.context = makeLocalContext(store, namespace, path)
+```
+The definition of method "makeLocalContext" is
+```javascript
+/**
+ * make localized dispatch, commit, getters and state
+ * if there is no namespace, just use root ones
+ */
+function makeLocalContext (store, namespace, path) {
+  const noNamespace = namespace === ''
+
+  const local = {
+    dispatch: noNamespace ? store.dispatch : (_type, _payload, _options) => {
+      const args = unifyObjectStyle(_type, _payload, _options)
+      const { payload, options } = args
+      let { type } = args
+
+      if (!options || !options.root) {
+        type = namespace + type
+        if (process.env.NODE_ENV !== 'production' && !store._actions[type]) {
+          console.error(`[vuex] unknown local action type: ${args.type}, global type: ${type}`)
+          return
+        }
+      }
+
+      return store.dispatch(type, payload)
+    },
+
+    commit: noNamespace ? store.commit : (_type, _payload, _options) => {
+      const args = unifyObjectStyle(_type, _payload, _options)
+      const { payload, options } = args
+      let { type } = args
+
+      if (!options || !options.root) {
+        type = namespace + type
+        if (process.env.NODE_ENV !== 'production' && !store._mutations[type]) {
+          console.error(`[vuex] unknown local mutation type: ${args.type}, global type: ${type}`)
+          return
+        }
+      }
+
+      store.commit(type, payload, options)
+    }
+  }
+
+  // getters and state object must be gotten lazily
+  // because they will be changed by vm update
+  Object.defineProperties(local, {
+    getters: {
+      get: noNamespace
+        ? () => store.getters
+        : () => makeLocalGetters(store, namespace)
+    },
+    state: {
+      get: () => getNestedState(store.state, path)
+    }
+  })
+
+  return local
+}
+```
+At first glance, this method might look complex. Let's simplify it a little bit.
+```javascript
+function makeLocalContext (store, namespace, path) {
+  const local = {
+    ...
+  };
+  
+  Object.defineProperties(local, {});
+  return local;
+}
+```
+This method just defines a plain object and returns it.  
+What exactly the variable *local* is defined? 
+First of all, the *local* is initialized as a plain object with two properties *dispatch* and *commit*. The value of both properties
+are a ternary operator. Let's see the *dispatch* first.  
+```javascript
+const local = {
+  dispatch: noNamespace ? store.dispatch : (_type, _payload, _options) => {
+    const args = unifyObjectStyle(_type, _payload, _options)
+    const { payload, options } = args
+    let { type } = args
+
+    if (!options || !options.root) {
+      type = namespace + type
+      if (process.env.NODE_ENV !== 'production' && !store._actions[type]) {
+        console.error(`[vuex] unknown local action type: ${args.type}, global type: ${type}`)
+        return
+      }
+    }
+
+    return store.dispatch(type, payload)
+  }
+}
+```
+The variable *noNamespace* is defined at the beginning of the method.  
+```javascript
+const noNamespace = namespace === ''
+```
+If the second parameter of method is not an empty string, then, it is defined in a name space.  
+If there is no namespace defined, then it directly uses the dispatch defined in the root store. Otherwise, it would be a function.
+The function has three parameters, *_type*, *_payload* and *_options*. Normally, we use the *dispatch* like this:
+```javascript
+store.dispatch('ADD_WIDGET', {widgetId: 1});
+```
+If we use the dispatch in a module, we can pass the third parameter.
+```javascript
+store.dispatch('ADD_WIDGET', {widgetId: 1}, {root: true});
+```
+So, let's look at what *dispatch* does internally if the module is namespaced.  
+In the first line, all the three parameters are passed to a method called *unifyObjectStyle*, its definition is
+```javascript
+function unifyObjectStyle (type, payload, options) {
+  if (isObject(type) && type.type) {
+    options = payload
+    payload = type
+    type = type.type
+  }
+
+  if (process.env.NODE_ENV !== 'production') {
+    assert(typeof type === 'string', `expects string as the type, but found ${typeof type}.`)
+  }
+
+  return { type, payload, options }
+}
+```
+Firstly, it comes to a if block. It checks if the first parameter *type* is an object. If it is true, then check whether the object has property
+*type*. If both conditions are met, then it reassign the variables.
+The second parameter becomes the *options*.  
+The first parameter becomes the *payload*.  
+The type is assigned with *type.type*.
+At the end of this method, it returns three parameters as a single object.
+You might already figured out that it compresses the first and second parameter of the *dispatch* into one. This is called "object style"
+dispatch in the document.  
+Under the development mode, if the *type* is not a string, it warns you that the *type* must be a string.  
+Then, in the *dispatch* function, it assigns a few variables and come to a if block.
+```javascript
+if (!options || !options.root) {
+  type = namespace + type
+  if (process.env.NODE_ENV !== 'production' && !store._actions[type]) {
+    console.error(`[vuex] unknown local action type: ${args.type}, global type: ${type}`)
+    return
+  }
+}
+```
+The condition means the *dispatch* doesn't call with *options* or setting *options.root* to false, then it must dispatch a local action.
+Then, variable *type* is prefixed with *namespace*. When it is under the development environment and the namespaced the action is not defined,
+then prints out an error message.  
+Finally, it calls *store.dispatch* with *type* and *payload*. Then, it returns its result.  
+The *commit* is pretty much the same. Except, at the end, it calls the *store.commit* with third parameter *options*. But, it doesn't return
+the result.
+```javascript
+// getters and state object must be gotten lazily
+// because they will be changed by vm update
+Object.defineProperties(local, {
+  getters: {
+    get: noNamespace
+      ? () => store.getters
+      : () => makeLocalGetters(store, namespace)
+  },
+  state: {
+    get: () => getNestedState(store.state, path)
+  }
+})
+```
+It adds two properties *getters* and *state*. Instead of defining what is the getters and state, it defines the *getter* of both properties.
+For *getters*, if the namespace is not defined, then it calls the *makeLocalGetters*
+```javascript
+function makeLocalGetters (store, namespace) {
+  const gettersProxy = {}
+
+  const splitPos = namespace.length
+  Object.keys(store.getters).forEach(type => {
+    // skip if the target getter is not match this namespace
+    if (type.slice(0, splitPos) !== namespace) return
+
+    // extract local getter type
+    const localType = type.slice(splitPos)
+
+    // Add a port to the getters proxy.
+    // Define as getter property because
+    // we do not want to evaluate the getters in this time.
+    Object.defineProperty(gettersProxy, localType, {
+      get: () => store.getters[type],
+      enumerable: true
+    })
+  })
+
+  return gettersProxy
+}
+```
+First of all, it defines the constant *gettersProxy* and return it at the end of the function. So, we could guess the code in between is just
+filling the *gettersProxy*. Then, it assign the length of *namespace* to a constant *splitPos*.  
+Next, it loops through the keys of all *store.getters*.
+```javascript
+type.slice(0, splitPos) !== namespace
+```
+*splitPos* is the length of the namespace. So, it extracts the namespace from key. If it fails to extract, then return directly.  
+If it successfully extract the namespace, then it gets the local type from the *type*. After that, it defines the *localType* on *gettersProxy*.
+The *getter* of *localType* points to *store.getters[type]* and it is enumerable.  
+So, all the "local getters" actually proxy to the *store.getters*.
